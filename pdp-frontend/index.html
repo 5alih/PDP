@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Police Districting - PDP vs SA</title>
+    <!-- Leaflet CSS + JS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background: #f0f0f0;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        .controls {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .controls input, .controls button {
+            padding: 8px 12px;
+            margin: 5px;
+            font-size: 14px;
+        }
+        .maps-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            justify-content: center;
+        }
+        .map-card {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow: hidden;
+            width: 45%;
+            min-width: 400px;
+        }
+        .map-card h3 {
+            text-align: center;
+            margin: 10px 0;
+            color: #555;
+        }
+        .map {
+            height: 500px;
+            width: 100%;
+        }
+        .metrics {
+            padding: 10px;
+            font-size: 14px;
+            background: #f9f9f9;
+            border-top: 1px solid #ddd;
+        }
+        .error {
+            color: red;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <h1>Police Districting Problem - Chicago Crime Data</h1>
+    <div class="controls">
+        <label>Year: <input type="number" id="year" value="2023" min="2001" max="2025"></label>
+        <label>Districts: <input type="number" id="numDistricts" value="6" min="2" max="12"></label>
+        <button id="runBtn">Run Both Algorithms</button>
+    </div>
+    <div class="maps-container">
+        <div class="map-card">
+            <h3>PDP Algorithm (Greedy)</h3>
+            <div id="mapPdp" class="map"></div>
+            <div id="metricsPdp" class="metrics">Objective: -- | Workloads: --</div>
+        </div>
+        <div class="map-card">
+            <h3>Simulated Annealing (D'Amico)</h3>
+            <div id="mapSa" class="map"></div>
+            <div id="metricsSa" class="metrics">Objective: -- | Workloads: --</div>
+        </div>
+    </div>
+
+    <script>
+        let mapPdp, mapSa;
+        let layerPdp, layerSa;
+
+        // Initialize maps (centered on Chicago)
+        function initMaps() {
+            const chicago = [41.8781, -87.6298];
+            mapPdp = L.map('mapPdp').setView(chicago, 11);
+            mapSa = L.map('mapSa').setView(chicago, 11);
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> & CartoDB'
+            }).addTo(mapPdp);
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> & CartoDB'
+            }).addTo(mapSa);
+        }
+
+        // Color palette for up to 12 districts
+        const colors = [
+            '#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231', '#911eb4',
+            '#46f0f0', '#f032e6', '#bcf60c', '#fabebe', '#008080', '#e6beff'
+        ];
+
+        // Draw grid cells on a map
+        function drawDistricts(map, districts, bounds, gridSize, workloads) {
+            // Remove previous layer if exists
+            if (map._districtLayer) map.removeLayer(map._districtLayer);
+            
+            const cellWidth = (bounds.maxLon - bounds.minLon) / gridSize;
+            const cellHeight = (bounds.maxLat - bounds.minLat) / gridSize;
+            
+            const group = L.layerGroup();
+            
+            for (let dIdx = 0; dIdx < districts.length; dIdx++) {
+                const cells = districts[dIdx];
+                const color = colors[dIdx % colors.length];
+                for (const [x, y] of cells) {
+                    // Convert grid cell (x,y) to lat/lon bounds
+                    const west = bounds.minLon + y * cellWidth;
+                    const east = west + cellWidth;
+                    const north = bounds.maxLat - x * cellHeight;
+                    const south = north - cellHeight;
+                    L.rectangle([[south, west], [north, east]], {
+                        color: color,
+                        weight: 1,
+                        fillColor: color,
+                        fillOpacity: 0.6,
+                        interactive: true
+                    }).bindTooltip(`District ${dIdx+1}<br>Workload: ${workloads[dIdx].toFixed(4)}`).addTo(group);
+                }
+            }
+            group.addTo(map);
+            map._districtLayer = group;
+        }
+
+        async function runAlgorithms() {
+            const year = document.getElementById('year').value;
+            const numDistricts = parseInt(document.getElementById('numDistricts').value);
+            const requestBody = { numDistricts, year, maxRecords: 20000 };
+            
+            // Show loading
+            document.getElementById('metricsPdp').innerText = 'Loading PDP...';
+            document.getElementById('metricsSa').innerText = 'Loading SA...';
+            
+            try {
+                // Parallel requests
+                const [pdpResp, saResp] = await Promise.all([
+                    fetch('http://localhost:8088/api/pdp/solve', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(requestBody)
+                    }),
+                    fetch('http://localhost:8088/api/sa/solve', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(requestBody)
+                    })
+                ]);
+                
+                if (!pdpResp.ok || !saResp.ok) throw new Error('Backend error');
+                const pdpData = await pdpResp.json();
+                const saData = await saResp.json();
+                
+                // Draw maps (bounds and gridSize are same for both)
+                const bounds = {
+                    minLat: pdpData.minLat,
+                    maxLat: pdpData.maxLat,
+                    minLon: pdpData.minLon,
+                    maxLon: pdpData.maxLon
+                };
+                const gridSize = pdpData.gridSize;
+                
+                drawDistricts(mapPdp, pdpData.districts, bounds, gridSize, pdpData.workloads);
+                drawDistricts(mapSa, saData.districts, bounds, gridSize, saData.workloads);
+                
+                // Update metrics
+                document.getElementById('metricsPdp').innerHTML = `Objective: ${pdpData.objectiveValue.toFixed(6)} | Workloads: ${pdpData.workloads.map(w=>w.toFixed(3)).join(', ')}`;
+                document.getElementById('metricsSa').innerHTML = `Objective: ${saData.objectiveValue.toFixed(6)} | Workloads: ${saData.workloads.map(w=>w.toFixed(3)).join(', ')}`;
+            } catch (err) {
+                document.getElementById('metricsPdp').innerText = 'Error: ' + err.message;
+                document.getElementById('metricsSa').innerText = 'Error: ' + err.message;
+            }
+        }
+
+        // Setup
+        initMaps();
+        document.getElementById('runBtn').addEventListener('click', runAlgorithms);
+        // Run default on page load
+        runAlgorithms();
+    </script>
+</body>
+</html>
