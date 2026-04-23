@@ -10,23 +10,27 @@ import java.util.List;
 @NoArgsConstructor
 public class District {
     private List<GridCell> cells = new ArrayList<>();
-    
+
     public District(List<GridCell> cells) {
         this.cells = new ArrayList<>(cells);
     }
-    
+
     public void addCell(GridCell cell) {
         cells.add(cell);
     }
-    
+
     public void removeCell(GridCell cell) {
         cells.remove(cell);
     }
-    
-    public int getDemand() {
+
+    public int getCrimeCount() {
         return cells.stream().mapToInt(GridCell::getCrimeCount).sum();
     }
-    
+
+    public double getDemand() {
+        return cells.stream().mapToDouble(GridCell::getRiskScore).sum();
+    }
+
     public int size() {
         return cells.size();
     }

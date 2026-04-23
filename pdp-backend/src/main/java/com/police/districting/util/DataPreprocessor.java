@@ -49,7 +49,7 @@ public class DataPreprocessor {
         double latStep = bounds.getLatBinSize();
         double lonStep = bounds.getLonBinSize();
 
-        // Assign each crime to a grid cell
+        // Count crimes per cell
         Map<String, Long> cellCounts = crimes.stream().collect(Collectors.groupingBy(
             crime -> {
                 int latBin = Math.min((int) ((crime.getLatitude() - bounds.minLat) / latStep), gridSize - 1);
@@ -59,12 +59,21 @@ public class DataPreprocessor {
             Collectors.counting()
         ));
 
+        // Max count for normalization
+        long maxCount = cellCounts.values().stream().mapToLong(Long::longValue).max().orElse(1L);
+
         List<GridCell> cells = new ArrayList<>();
         for (int i = 0; i < gridSize; i++) {
             for (int j = 0; j < gridSize; j++) {
                 String key = i + "," + j;
                 int count = cellCounts.getOrDefault(key, 0L).intValue();
-                cells.add(new GridCell(i, j, count));
+
+                // Paper-inspired risk proxy:
+                // normalize count to [0,1], then slightly emphasize hotspots
+                double normalized = maxCount == 0 ? 0.0 : (double) count / maxCount;
+                double riskScore = Math.pow(normalized, 1.5);
+
+                cells.add(new GridCell(i, j, count, riskScore));
             }
         }
         return cells;
