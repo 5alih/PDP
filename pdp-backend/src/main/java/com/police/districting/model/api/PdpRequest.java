@@ -1,19 +1,32 @@
 package com.police.districting.model.api;
 
-import lombok.Data;
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
+import lombok.Data;
 
 @Data
 public class PdpRequest {
+
     @NotNull
     @Min(1)
-    private Integer numDistricts;  // number of districts (p)
-    
+    private Integer numDistricts;
+
     @NotNull
+    @Min(2001)
+    private Integer year;
+
     @Min(1)
-    private Integer year;          // year of crime data
-    
-    @Min(1)
-    private Integer maxRecords;    // optional limit on crime records
+    private Integer maxRecords;
+
+    @Min(2)
+    private Integer gridSize;
+
+    @DecimalMin("0.0")
+    @DecimalMax("1.0")
+    private Double lambda;
+
+    @Min(100)
+    private Long timeLimitMillis;
 }
