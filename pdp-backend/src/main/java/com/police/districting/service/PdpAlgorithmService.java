@@ -7,6 +7,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.Comparator;
 
 @Slf4j
 @Service
@@ -149,23 +150,35 @@ public class PdpAlgorithmService {
      * Phase 2: Greedy expansion while preserving connectivity
      */
     private List<District> buildGreedyInitialSolution(List<GridCell> allCells, int numDistricts) {
-        List<GridCell> shuffled = new ArrayList<>(allCells);
-        Collections.shuffle(shuffled, random);
-
         List<District> districts = new ArrayList<>();
         Set<String> assigned = new HashSet<>();
 
-        // Random initialization: one distinct cell per district
+        // Stratified random seed placement: sort cells by X only (south→north),
+        // Chicago's main elongated axis. Sorting by (X,Y) clusters seeds diagonally
+        // which is wrong for Chicago's shape and causes systematic dead-ends.
+        List<GridCell> sorted = new ArrayList<>(allCells);
+        sorted.sort(Comparator.comparingInt(GridCell::getX));
+
+        int segSize = sorted.size() / numDistricts;
         for (int i = 0; i < numDistricts; i++) {
+            int start = i * segSize;
+            int end = (i == numDistricts - 1) ? sorted.size() : start + segSize;
+            List<GridCell> segment = sorted.subList(start, end);
+
+            GridCell seed;
+            int attempts = 0;
+            do {
+                seed = segment.get(random.nextInt(segment.size()));
+                attempts++;
+            } while (assigned.contains(cellKey(seed)) && attempts < segment.size());
+
             District district = new District();
-            GridCell seed = shuffled.get(i);
             district.addCell(seed);
             districts.add(district);
             assigned.add(cellKey(seed));
         }
 
-        List<GridCell> remaining = shuffled.subList(numDistricts, shuffled.size())
-                .stream()
+        List<GridCell> remaining = allCells.stream()
                 .filter(cell -> !assigned.contains(cellKey(cell)))
                 .collect(Collectors.toCollection(ArrayList::new));
 
@@ -301,22 +314,11 @@ public class PdpAlgorithmService {
             return false;
         }
 
-        // Enforce min/max district size to prevent degenerate solutions where the
-        // objective is gamed by creating tiny districts with near-zero workload.
-        // Min = 50% of ideal size, max = 200% of ideal size.
-        int idealSize = expectedCellCount / expectedDistrictCount;
-        int minSize = Math.max(1, idealSize / 2);
-        int maxSize = idealSize * 2;
-
         int totalAssigned = 0;
         Set<String> seen = new HashSet<>();
 
         for (District district : districts) {
             if (district == null || district.getCells().isEmpty()) {
-                return false;
-            }
-
-            if (district.size() < minSize || district.size() > maxSize) {
                 return false;
             }
 

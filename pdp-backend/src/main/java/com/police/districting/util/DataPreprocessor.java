@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -79,9 +80,40 @@ public class DataPreprocessor {
             }
         }
 
+        // Remove void cells using crime data as the authoritative Chicago boundary indicator.
+        // The crime dataset is exclusively Chicago data, so crimeCount > 0 definitively
+        // means the cell is inside Chicago.
+        // A cell with streets but no crime and no crime-cell neighbours is a suburb
+        // (the bounding-box OSM query includes surrounding areas like Evanston/Oak Park).
+        // A cell with streets, no crime, but adjacent to crime cells is a valid interior
+        // Chicago cell that simply had no recorded crime that year (park, airport, etc.).
+        if (!streetLengths.isEmpty()) {
+            Set<String> crimeCellKeys = cells.stream()
+                    .filter(c -> c.getCrimeCount() > 0)
+                    .map(c -> c.getX() + "," + c.getY())
+                    .collect(java.util.stream.Collectors.toSet());
+
+            int[][] dirs = {{-1,0},{1,0},{0,-1},{0,1}};
+            int before = cells.size();
+            cells = cells.stream()
+                    .filter(c -> {
+                        if (c.getCrimeCount() > 0) return true;    // definitely Chicago
+                        if (c.getStreetLength() == 0) return false; // lake / truly empty
+                        // Has streets but no crime: keep only if next to a crime cell
+                        for (int[] d : dirs) {
+                            if (crimeCellKeys.contains((c.getX()+d[0]) + "," + (c.getY()+d[1])))
+                                return true;
+                        }
+                        return false; // suburban cell — no crime, no crime neighbours
+                    })
+                    .collect(Collectors.toList());
+            log.info("Void removal: {} cells removed ({} active cells remain)",
+                    before - cells.size(), cells.size());
+        }
+
         long nonZeroCells = cells.stream().filter(c -> c.getCrimeCount() > 0).count();
         long streetCells  = cells.stream().filter(c -> c.getStreetLength() > 0).count();
-        log.info("Grid {}x{}: {} cells, {} with crime, {} with street data (maxCrimeCount={})",
+        log.info("Grid {}x{}: {} active cells, {} with crime, {} with street data (maxCrimeCount={})",
                 gridSize, gridSize, cells.size(), nonZeroCells, streetCells, maxCount);
 
         return cells;

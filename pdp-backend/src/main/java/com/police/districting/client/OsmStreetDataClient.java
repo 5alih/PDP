@@ -23,6 +23,10 @@ public class OsmStreetDataClient {
 
     private final WebClient webClient;
 
+    // Cache the last successful result so transient OSM failures don't silently
+    // fall back to 400 cells and skip void removal.
+    private Map<String, Double> cachedStreetLengths = null;
+
     public OsmStreetDataClient() {
         this.webClient = WebClient.builder()
                 .baseUrl(OVERPASS_URL)
@@ -41,8 +45,9 @@ public class OsmStreetDataClient {
      * to the uniform cell-count area approximation.
      */
     public Mono<Map<String, Double>> fetchStreetLengths(GridBounds bounds, int gridSize) {
-        // Exclude non-vehicle ways (footpaths, cycleways, etc.) to keep response size manageable.
-        // Police patrol districts concern driveable roads only.
+        // Query by bounding box — the Chicago area OSM approach was tried but removed too many
+        // interior cells (parks, airport, industrial areas with no public roads), leaving only
+        // ~227 cells in a fragmented shape that the convexity constraint cannot satisfy.
         String query = String.format(
                 java.util.Locale.ROOT,
                 "[out:json][timeout:60];"
@@ -55,17 +60,31 @@ public class OsmStreetDataClient {
                 String.format("%.4f", bounds.minLat), String.format("%.4f", bounds.minLon),
                 String.format("%.4f", bounds.maxLat), String.format("%.4f", bounds.maxLon));
 
+        if (cachedStreetLengths != null) {
+            log.info("OSM: using cached street data ({} cells)", cachedStreetLengths.size());
+            return Mono.just(cachedStreetLengths);
+        }
+
         return webClient.post()
                 .body(BodyInserters.fromFormData("data", query))
                 .retrieve()
                 .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
                 .map(response -> parseStreetLengths(response, bounds, gridSize))
                 .defaultIfEmpty(Collections.emptyMap())
-                .doOnSuccess(result -> log.info("OSM: got street data for {} cells, total={}m",
-                        result.size(),
-                        String.format("%.1f", result.values().stream().mapToDouble(Double::doubleValue).sum())))
+                .doOnSuccess(result -> {
+                    if (!result.isEmpty()) {
+                        cachedStreetLengths = result;
+                        log.info("OSM: got street data for {} cells, total={}m (cached for future requests)",
+                                result.size(),
+                                String.format("%.1f", result.values().stream().mapToDouble(Double::doubleValue).sum()));
+                    }
+                })
                 .onErrorResume(e -> {
-                    log.warn("OSM: fetch failed ({}), falling back to uniform area", e.getMessage());
+                    if (cachedStreetLengths != null) {
+                        log.warn("OSM: fetch failed ({}), using cached data", e.getMessage());
+                        return Mono.just(cachedStreetLengths);
+                    }
+                    log.warn("OSM: fetch failed ({}), no cache available — void removal will be skipped", e.getMessage());
                     return Mono.just(Collections.emptyMap());
                 });
     }

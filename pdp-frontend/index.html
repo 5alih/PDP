@@ -59,6 +59,15 @@
             color: red;
             text-align: center;
         }
+        #toggleDistrictsBtn {
+            background: #333;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        #toggleDistrictsBtn.active {
+            background: #e6194b;
+        }
     </style>
 </head>
 <body>
@@ -67,6 +76,7 @@
         <label>Year: <input type="number" id="year" value="2023" min="2001" max="2025"></label>
         <label>Districts: <input type="number" id="numDistricts" value="6" min="2" max="12"></label>
         <button id="runBtn">Run Both Algorithms</button>
+        <button id="toggleDistrictsBtn">Show Real Chicago Districts</button>
     </div>
     <div class="maps-container">
         <div class="map-card">
@@ -84,6 +94,65 @@
     <script>
         let mapPdp, mapSa;
         let layerPdp, layerSa;
+
+        // Real Chicago police district overlay
+        let chicagoDistrictsGeoJson = null;   // cached GeoJSON data
+        let chicagoLayerPdp = null;           // Leaflet layer on PDP map
+        let chicagoLayerSa  = null;           // Leaflet layer on SA map
+        let chicagoVisible  = false;
+
+        // Chicago Data Portal GeoJSON endpoints return null geometries (known Socrata issue).
+        // Using a GitHub-hosted copy of the same boundaries as fallback.
+        const CHICAGO_DISTRICTS_URL =
+            'https://raw.githubusercontent.com/RonKG/Machine-Learning-Projects-2/master/2.%20data_storytelling_project/chicago_police_districts.geojson';
+
+        function chicagoLayerStyle() {
+            return { color: '#000', weight: 2.5, fillOpacity: 0, opacity: 0.75 };
+        }
+
+        function chicagoLayerOnEachFeature(feature, layer) {
+            const name = feature.properties.dist_label || feature.properties.dist_num || '';
+            layer.bindTooltip(`Chicago District ${name}`, { sticky: true });
+        }
+
+        async function ensureChicagoData() {
+            if (chicagoDistrictsGeoJson) return chicagoDistrictsGeoJson;
+            const resp = await fetch(CHICAGO_DISTRICTS_URL);
+            if (!resp.ok) throw new Error('Failed to fetch Chicago district boundaries');
+            chicagoDistrictsGeoJson = await resp.json();
+            return chicagoDistrictsGeoJson;
+        }
+
+        function addChicagoLayer(map) {
+            return L.geoJSON(chicagoDistrictsGeoJson, {
+                style: chicagoLayerStyle,
+                onEachFeature: chicagoLayerOnEachFeature
+            }).addTo(map);
+        }
+
+        async function toggleChicagoDistricts() {
+            const btn = document.getElementById('toggleDistrictsBtn');
+            if (chicagoVisible) {
+                if (chicagoLayerPdp) { mapPdp.removeLayer(chicagoLayerPdp); chicagoLayerPdp = null; }
+                if (chicagoLayerSa)  { mapSa.removeLayer(chicagoLayerSa);  chicagoLayerSa  = null; }
+                chicagoVisible = false;
+                btn.textContent = 'Show Real Chicago Districts';
+                btn.classList.remove('active');
+            } else {
+                btn.textContent = 'Loading...';
+                try {
+                    await ensureChicagoData();
+                    chicagoLayerPdp = addChicagoLayer(mapPdp);
+                    chicagoLayerSa  = addChicagoLayer(mapSa);
+                    chicagoVisible = true;
+                    btn.textContent = 'Hide Real Chicago Districts';
+                    btn.classList.add('active');
+                } catch (e) {
+                    btn.textContent = 'Show Real Chicago Districts';
+                    alert('Could not load Chicago district boundaries: ' + e.message);
+                }
+            }
+        }
 
         // Initialize maps (centered on Chicago)
         function initMaps() {
@@ -136,33 +205,40 @@
             map._districtLayer = group;
         }
 
+        async function fetchWithRetry(url, body, label, maxAttempts = 3) {
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                const suffix = attempt > 1 ? ` (retry ${attempt}/${maxAttempts})` : '';
+                document.getElementById('metricsPdp').innerText = `Loading ${label}...${suffix}`;
+                const resp = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                if (!resp.ok) throw new Error(`${label} backend error`);
+                const data = await resp.json();
+                if (data.districts && data.districts.length > 0) return data;
+                if (attempt < maxAttempts)
+                    console.warn(`${label} returned empty result, retrying...`);
+            }
+            return null;
+        }
+
         async function runAlgorithms() {
             const year = document.getElementById('year').value;
             const numDistricts = parseInt(document.getElementById('numDistricts').value);
             const requestBody = { numDistricts, year, maxRecords: 20000 };
-            
-            // Sequential requests: the backend service is a singleton with shared
-            // mutable state, so parallel requests would corrupt each other's context.
+
             document.getElementById('metricsPdp').innerText = 'Loading PDP...';
             document.getElementById('metricsSa').innerText = 'Waiting for PDP...';
 
             try {
-                const pdpResp = await fetch('http://localhost:8088/api/pdp/solve', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(requestBody)
-                });
-                if (!pdpResp.ok) throw new Error('PDP backend error');
-                const pdpData = await pdpResp.json();
+                const pdpData = await fetchWithRetry(
+                    'http://localhost:8088/api/pdp/solve', requestBody, 'PDP');
+                if (!pdpData) throw new Error('PDP returned no solution after 3 attempts');
 
                 document.getElementById('metricsSa').innerText = 'Loading SA...';
-                const saResp = await fetch('http://localhost:8088/api/sa/solve', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(requestBody)
-                });
-                if (!saResp.ok) throw new Error('SA backend error');
-                const saData = await saResp.json();
+                const saData = await fetchWithRetry(
+                    'http://localhost:8088/api/sa/solve', requestBody, 'SA');
 
                 const bounds = {
                     minLat: pdpData.minLat,
@@ -172,10 +248,16 @@
                 };
 
                 drawDistricts(mapPdp, pdpData.districts, bounds, pdpData.gridSize, pdpData.workloads);
-                drawDistricts(mapSa, saData.districts, bounds, saData.gridSize, saData.workloads);
+                document.getElementById('metricsPdp').innerHTML =
+                    `Objective: ${pdpData.objectiveValue.toFixed(6)} | Workloads: ${pdpData.workloads.map(w=>w.toFixed(3)).join(', ')}`;
 
-                document.getElementById('metricsPdp').innerHTML = `Objective: ${pdpData.objectiveValue.toFixed(6)} | Workloads: ${pdpData.workloads.map(w=>w.toFixed(3)).join(', ')}`;
-                document.getElementById('metricsSa').innerHTML = `Objective: ${saData.objectiveValue.toFixed(6)} | Workloads: ${saData.workloads.map(w=>w.toFixed(3)).join(', ')}`;
+                if (saData) {
+                    drawDistricts(mapSa, saData.districts, bounds, saData.gridSize, saData.workloads);
+                    document.getElementById('metricsSa').innerHTML =
+                        `Objective: ${saData.objectiveValue.toFixed(6)} | Workloads: ${saData.workloads.map(w=>w.toFixed(3)).join(', ')}`;
+                } else {
+                    document.getElementById('metricsSa').innerText = 'SA: no solution found after 3 attempts';
+                }
             } catch (err) {
                 document.getElementById('metricsPdp').innerText = 'Error: ' + err.message;
                 document.getElementById('metricsSa').innerText = 'Error: ' + err.message;
@@ -185,6 +267,7 @@
         // Setup
         initMaps();
         document.getElementById('runBtn').addEventListener('click', runAlgorithms);
+        document.getElementById('toggleDistrictsBtn').addEventListener('click', toggleChicagoDistricts);
         // Run default on page load
         runAlgorithms();
     </script>
