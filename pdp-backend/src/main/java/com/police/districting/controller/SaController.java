@@ -1,6 +1,8 @@
 package com.police.districting.controller;
 
+import com.police.districting.client.OsmStreetDataClient;
 import com.police.districting.model.CrimeRecord;
+import com.police.districting.model.District;
 import com.police.districting.model.GridCell;
 import com.police.districting.model.api.DistrictingResponse;
 import com.police.districting.model.api.SaRequest;
@@ -8,11 +10,14 @@ import com.police.districting.service.ChicagoDataService;
 import com.police.districting.service.PdpAlgorithmService;
 import com.police.districting.service.SimulatedAnnealingService;
 import com.police.districting.util.DataPreprocessor;
+import com.police.districting.util.DataPreprocessor.GridBounds;
 import jakarta.validation.Valid;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @RestController
@@ -28,6 +33,9 @@ public class SaController {
 
     @Autowired
     private PdpAlgorithmService pdpService;
+
+    @Autowired
+    private OsmStreetDataClient osmClient;
 
     @PostMapping("/solve")
     public DistrictingResponse solveSa(@Valid @RequestBody SaRequest request) {
@@ -47,30 +55,24 @@ public class SaController {
 
         if (crimes == null || crimes.isEmpty()) {
             return new DistrictingResponse(
-                    List.of(),
-                    0.0,
-                    List.of(),
-                    0.0,
-                    0.0,
-                    false,
+                    List.of(), 0.0, List.of(), 0.0, 0.0, false,
                     System.currentTimeMillis() - startTime,
-                    0,
-                    gridSize,
-                    request.getNumDistricts(),
-                    request.getYear(),
-                    maxRecords,
-                    lambda,
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0
+                    0, gridSize, request.getNumDistricts(), request.getYear(),
+                    maxRecords, lambda, 0.0, 0.0, 0.0, 0.0
             );
         }
 
-        List<GridCell> cells = DataPreprocessor.createGrid(crimes, gridSize);
+        GridBounds bounds = DataPreprocessor.computeBounds(crimes, gridSize);
+
+        Map<String, Double> streetLengths = osmClient
+                .fetchStreetLengths(bounds, gridSize)
+                .blockOptional()
+                .orElse(Collections.emptyMap());
+
+        List<GridCell> cells = DataPreprocessor.createGrid(crimes, gridSize, streetLengths);
 
         long algorithmTimeLimitMillis =
-                request.getTimeLimitMillis() != null ? request.getTimeLimitMillis() : 5000L;
+                request.getTimeLimitMillis() != null ? request.getTimeLimitMillis() : 60000L;
 
         var districts = saService.runSa(
                 cells,
@@ -82,27 +84,13 @@ public class SaController {
                 algorithmTimeLimitMillis
         );
 
-        var bounds = DataPreprocessor.computeBounds(crimes, gridSize);
-
         if (districts == null || districts.isEmpty()) {
             return new DistrictingResponse(
-                    List.of(),
-                    0.0,
-                    List.of(),
-                    0.0,
-                    0.0,
-                    false,
+                    List.of(), 0.0, List.of(), 0.0, 0.0, false,
                     System.currentTimeMillis() - startTime,
-                    cells.size(),
-                    gridSize,
-                    request.getNumDistricts(),
-                    request.getYear(),
-                    maxRecords,
-                    lambda,
-                    bounds.minLat,
-                    bounds.maxLat,
-                    bounds.minLon,
-                    bounds.maxLon
+                    cells.size(), gridSize, request.getNumDistricts(), request.getYear(),
+                    maxRecords, lambda,
+                    bounds.minLat, bounds.maxLat, bounds.minLon, bounds.maxLon
             );
         }
 
@@ -114,42 +102,22 @@ public class SaController {
 
         double finalObjective = pdpService.computeObjective(districts);
 
+        final List<District> finalDistricts = districts;
         List<Double> workloads = districts.stream()
-                .map(pdpService::computeWorkload)
+                .map(d -> pdpService.computeWorkload(d, finalDistricts))
                 .collect(Collectors.toList());
 
-        double maxWorkload = workloads.stream()
-                .mapToDouble(Double::doubleValue)
-                .max()
-                .orElse(0.0);
-
-        double avgWorkload = workloads.stream()
-                .mapToDouble(Double::doubleValue)
-                .average()
-                .orElse(0.0);
+        double maxWorkload = workloads.stream().mapToDouble(Double::doubleValue).max().orElse(0.0);
+        double avgWorkload = workloads.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
 
         boolean feasible = pdpService.isFeasible(districts, request.getNumDistricts(), cells.size());
 
-        long runtimeMillis = System.currentTimeMillis() - startTime;
-
         return new DistrictingResponse(
-                districtCells,
-                finalObjective,
-                workloads,
-                maxWorkload,
-                avgWorkload,
-                feasible,
-                runtimeMillis,
-                cells.size(),
-                gridSize,
-                request.getNumDistricts(),
-                request.getYear(),
-                maxRecords,
-                lambda,
-                bounds.minLat,
-                bounds.maxLat,
-                bounds.minLon,
-                bounds.maxLon
+                districtCells, finalObjective, workloads, maxWorkload, avgWorkload, feasible,
+                System.currentTimeMillis() - startTime,
+                cells.size(), gridSize, request.getNumDistricts(), request.getYear(),
+                maxRecords, lambda,
+                bounds.minLat, bounds.maxLat, bounds.minLon, bounds.maxLon
         );
     }
 }

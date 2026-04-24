@@ -45,8 +45,13 @@ public class SimulatedAnnealingService {
         this.expectedDistrictCount = numDistricts;
         this.expectedCellCount = cells.size();
 
-        // Start from PDP solution
-        List<District> currentSolution = pdpService.runPdp(cells, numDistricts, timeLimitMillis);
+        // Generate a single-pass feasible initial solution so SA runs independently
+        // of the full multi-start PDP. Retry up to 20 times because the random
+        // greedy pass can occasionally fail to satisfy convexity for all cells.
+        List<District> currentSolution = null;
+        for (int attempt = 0; attempt < 20 && (currentSolution == null || currentSolution.isEmpty()); attempt++) {
+            currentSolution = pdpService.buildSinglePassInitialSolution(cells, numDistricts);
+        }
         if (currentSolution == null || currentSolution.isEmpty()) {
             return Collections.emptyList();
         }
@@ -213,7 +218,8 @@ public class SimulatedAnnealingService {
                         cell.getX(),
                         cell.getY(),
                         cell.getCrimeCount(),
-                        cell.getRiskScore()
+                        cell.getRiskScore(),
+                        cell.getStreetLength()
                 ));
             }
             copy.add(newDist);

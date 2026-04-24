@@ -1,14 +1,6 @@
 package com.police.districting.util;
 
-import com.police.districting.service.ChicagoDataService.GridCell;
-
 public class GeoUtils {
-
-    public static GridCell toGridCell(double lat, double lon, double cellSizeDeg) {
-        double minLat = Math.floor(lat / cellSizeDeg) * cellSizeDeg;
-        double minLon = Math.floor(lon / cellSizeDeg) * cellSizeDeg;
-        return new GridCell(minLat, minLon);
-    }
 
     // Haversine distance in meters
     public static double haversine(double lat1, double lon1, double lat2, double lon2) {

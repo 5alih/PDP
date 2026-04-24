@@ -75,7 +75,7 @@
             <div id="metricsPdp" class="metrics">Objective: -- | Workloads: --</div>
         </div>
         <div class="map-card">
-            <h3>Simulated Annealing (D'Amico)</h3>
+            <h3>Simulated Annealing</h3>
             <div id="mapSa" class="map"></div>
             <div id="metricsSa" class="metrics">Objective: -- | Workloads: --</div>
         </div>
@@ -121,8 +121,8 @@
                     // Convert grid cell (x,y) to lat/lon bounds
                     const west = bounds.minLon + y * cellWidth;
                     const east = west + cellWidth;
-                    const north = bounds.maxLat - x * cellHeight;
-                    const south = north - cellHeight;
+                    const south = bounds.minLat + x * cellHeight;
+                    const north = south + cellHeight;
                     L.rectangle([[south, west], [north, east]], {
                         color: color,
                         weight: 1,
@@ -141,42 +141,39 @@
             const numDistricts = parseInt(document.getElementById('numDistricts').value);
             const requestBody = { numDistricts, year, maxRecords: 20000 };
             
-            // Show loading
+            // Sequential requests: the backend service is a singleton with shared
+            // mutable state, so parallel requests would corrupt each other's context.
             document.getElementById('metricsPdp').innerText = 'Loading PDP...';
-            document.getElementById('metricsSa').innerText = 'Loading SA...';
-            
+            document.getElementById('metricsSa').innerText = 'Waiting for PDP...';
+
             try {
-                // Parallel requests
-                const [pdpResp, saResp] = await Promise.all([
-                    fetch('http://localhost:8088/api/pdp/solve', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(requestBody)
-                    }),
-                    fetch('http://localhost:8088/api/sa/solve', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(requestBody)
-                    })
-                ]);
-                
-                if (!pdpResp.ok || !saResp.ok) throw new Error('Backend error');
+                const pdpResp = await fetch('http://localhost:8088/api/pdp/solve', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestBody)
+                });
+                if (!pdpResp.ok) throw new Error('PDP backend error');
                 const pdpData = await pdpResp.json();
+
+                document.getElementById('metricsSa').innerText = 'Loading SA...';
+                const saResp = await fetch('http://localhost:8088/api/sa/solve', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestBody)
+                });
+                if (!saResp.ok) throw new Error('SA backend error');
                 const saData = await saResp.json();
-                
-                // Draw maps (bounds and gridSize are same for both)
+
                 const bounds = {
                     minLat: pdpData.minLat,
                     maxLat: pdpData.maxLat,
                     minLon: pdpData.minLon,
                     maxLon: pdpData.maxLon
                 };
-                const gridSize = pdpData.gridSize;
-                
-                drawDistricts(mapPdp, pdpData.districts, bounds, gridSize, pdpData.workloads);
-                drawDistricts(mapSa, saData.districts, bounds, gridSize, saData.workloads);
-                
-                // Update metrics
+
+                drawDistricts(mapPdp, pdpData.districts, bounds, pdpData.gridSize, pdpData.workloads);
+                drawDistricts(mapSa, saData.districts, bounds, saData.gridSize, saData.workloads);
+
                 document.getElementById('metricsPdp').innerHTML = `Objective: ${pdpData.objectiveValue.toFixed(6)} | Workloads: ${pdpData.workloads.map(w=>w.toFixed(3)).join(', ')}`;
                 document.getElementById('metricsSa').innerHTML = `Objective: ${saData.objectiveValue.toFixed(6)} | Workloads: ${saData.workloads.map(w=>w.toFixed(3)).join(', ')}`;
             } catch (err) {

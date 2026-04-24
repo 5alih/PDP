@@ -12,4 +12,5 @@ public class GridCell {
     private int y;
     private int crimeCount;
     private double riskScore;
+    private double streetLength;
 }

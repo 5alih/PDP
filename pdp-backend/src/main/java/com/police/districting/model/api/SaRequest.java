@@ -28,7 +28,7 @@ public class SaRequest {
     private Double lambda = 0.5;
 
     @Min(100)
-    private Long timeLimitMillis = 5000L;
+    private Long timeLimitMillis = 60000L;
 
     @DecimalMin(value = "0.0001")
     private Double initialTemperature = 100.0;

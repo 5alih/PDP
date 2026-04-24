@@ -2,11 +2,13 @@ package com.police.districting.service;
 
 import com.police.districting.model.District;
 import com.police.districting.model.GridCell;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 public class PdpAlgorithmService {
 
@@ -14,16 +16,17 @@ public class PdpAlgorithmService {
     private int gridCols;
     private double totalDemand;
     private int totalCells;
+    private double totalStreetLength;
     private double maxPossibleDistance;
     private int currentNumDistricts;
     private List<District> currentSolutionReference = new ArrayList<>();
 
-    // Objective parameters
+    // Objective parameters — values from paper Section 4.3 (SNPC coordinator preferences)
     private double lambda = 0.5;   // balance between worst district and average district
-    private final double wAlpha = 0.2; // area
-    private final double wBeta = 0.1;  // isolation / lack of support
-    private final double wGamma = 0.5; // demand
-    private final double wDelta = 0.2; // diameter
+    private final double wAlpha = 0.45; // area
+    private final double wBeta = 0.05;  // isolation / lack of support
+    private final double wGamma = 0.45; // demand
+    private final double wDelta = 0.05; // diameter
 
     // Multi-start search count
     // private static final int DEFAULT_RESTARTS = 5;
@@ -41,6 +44,30 @@ public class PdpAlgorithmService {
         return isFeasibleSolution(districts, expectedDistrictCount, expectedCellCount);
     }
 
+    /**
+     * Produces one feasible initial solution via a single greedy pass + local search.
+     * Intended for SA warm-start so SA can run independently of the full multi-start PDP.
+     * Returns an empty list if the greedy pass fails to assign all cells.
+     */
+    public List<District> buildSinglePassInitialSolution(List<GridCell> cells, int numDistricts) {
+        this.currentNumDistricts = numDistricts;
+        initializeContext(cells);
+
+        List<District> solution = buildGreedyInitialSolution(cells, numDistricts);
+        if (!isCompleteAssignment(solution, cells.size())) {
+            return Collections.emptyList();
+        }
+
+        solution = improveWithLocalSearch(solution);
+
+        if (!isFeasibleSolution(solution, numDistricts, cells.size())) {
+            return Collections.emptyList();
+        }
+
+        this.currentSolutionReference = deepCopyDistricts(solution);
+        return solution;
+    }
+
     public List<District> runPdp(List<GridCell> cells, int numDistricts, long timeLimitMillis) {
         if (cells == null || cells.isEmpty()) {
             return Collections.emptyList();
@@ -55,13 +82,16 @@ public class PdpAlgorithmService {
         this.currentNumDistricts = numDistricts;
         initializeContext(cells);
 
+        log.info("PDP starting: numDistricts={}, timeLimitMs={}", numDistricts, timeLimitMillis);
         long startTime = System.currentTimeMillis();
 
         List<District> bestSolution = null;
         double bestObjective = Double.MAX_VALUE;
+        int iterations = 0;
 
         while (System.currentTimeMillis() - startTime < timeLimitMillis) {
             List<District> candidate = buildGreedyInitialSolution(cells, numDistricts);
+            iterations++;
 
             if (!isCompleteAssignment(candidate, cells.size())) {
                 continue;
@@ -77,12 +107,20 @@ public class PdpAlgorithmService {
             if (obj < bestObjective) {
                 bestObjective = obj;
                 bestSolution = deepCopyDistricts(candidate);
+                log.info("  PDP iteration {}: new best objective={}", iterations,
+                        String.format("%.6f", bestObjective));
             }
         }
 
         if (bestSolution == null) {
+            log.warn("PDP found no feasible solution after {} iterations", iterations);
             return Collections.emptyList();
         }
+
+        log.info("PDP done: {} iterations, best objective={}, sizes={}",
+                iterations,
+                String.format("%.6f", bestObjective),
+                bestSolution.stream().map(d -> d.getCells().size()).toList());
 
         this.currentSolutionReference = deepCopyDistricts(bestSolution);
         return bestSolution;
@@ -96,7 +134,14 @@ public class PdpAlgorithmService {
         this.gridCols = maxY + 1;
         this.totalDemand = cells.stream().mapToDouble(GridCell::getRiskScore).sum();
         this.totalCells = cells.size();
+        this.totalStreetLength = cells.stream().mapToDouble(GridCell::getStreetLength).sum();
         this.maxPossibleDistance = Math.max(1, (gridRows - 1) + (gridCols - 1));
+
+        log.info("Context: grid={}x{}, cells={}, totalDemand={}, totalStreetLength={}m, usingStreetData={}",
+                gridRows, gridCols, totalCells,
+                String.format("%.4f", totalDemand),
+                String.format("%.1f", totalStreetLength),
+                totalStreetLength > 0);
     }
 
     /**
@@ -156,14 +201,10 @@ public class PdpAlgorithmService {
                 }
             }
 
-            // Fallback: if no adjacent placement found, assign to best possible district
-            // This should rarely happen on a full rectangular grid, but prevents dead-end failure.
+            // Paper Algorithm 1: if no valid convex placement exists, return empty
+            // so the random search can retry with a different seed.
             if (bestCell == null) {
-                GridCell fallbackCell = remaining.get(0);
-                int fallbackDistrict = findClosestDistrictIndex(fallbackCell, districts);
-
-                districts.get(fallbackDistrict).addCell(fallbackCell);
-                remaining.remove(fallbackCell);
+                return Collections.emptyList();
             } else {
                 districts.get(bestDistrictIndex).addCell(bestCell);
                 remaining.remove(bestCell);
@@ -250,23 +291,6 @@ public class PdpAlgorithmService {
         return current;
     }
 
-    private int findClosestDistrictIndex(GridCell cell, List<District> districts) {
-        int bestIndex = 0;
-        int bestDistance = Integer.MAX_VALUE;
-
-        for (int i = 0; i < districts.size(); i++) {
-            District district = districts.get(i);
-            for (GridCell districtCell : district.getCells()) {
-                int dist = manhattan(cell, districtCell);
-                if (dist < bestDistance) {
-                    bestDistance = dist;
-                    bestIndex = i;
-                }
-            }
-        }
-        return bestIndex;
-    }
-
     private boolean isCompleteAssignment(List<District> districts, int expectedCellCount) {
         int assignedCount = districts.stream().mapToInt(District::size).sum();
         return assignedCount == expectedCellCount;
@@ -277,11 +301,22 @@ public class PdpAlgorithmService {
             return false;
         }
 
+        // Enforce min/max district size to prevent degenerate solutions where the
+        // objective is gamed by creating tiny districts with near-zero workload.
+        // Min = 50% of ideal size, max = 200% of ideal size.
+        int idealSize = expectedCellCount / expectedDistrictCount;
+        int minSize = Math.max(1, idealSize / 2);
+        int maxSize = idealSize * 2;
+
         int totalAssigned = 0;
         Set<String> seen = new HashSet<>();
 
         for (District district : districts) {
             if (district == null || district.getCells().isEmpty()) {
+                return false;
+            }
+
+            if (district.size() < minSize || district.size() > maxSize) {
                 return false;
             }
 
@@ -295,7 +330,7 @@ public class PdpAlgorithmService {
             for (GridCell cell : district.getCells()) {
                 totalAssigned++;
                 if (!seen.add(cellKey(cell))) {
-                    return false; // duplicate assignment
+                    return false;
                 }
             }
         }
@@ -411,7 +446,7 @@ public class PdpAlgorithmService {
         return computeWorkload(district, currentSolutionReference);
     }
 
-    private double computeWorkload(District district, List<District> allDistricts) {
+    public double computeWorkload(District district, List<District> allDistricts) {
         double area = areaRatio(district);
         double isolation = isolationRatio(district, allDistricts);
         double demand = demandRatio(district);
@@ -424,8 +459,16 @@ public class PdpAlgorithmService {
     }
 
     private double areaRatio(District district) {
-        if (district.getCells().isEmpty() || totalCells == 0) {
+        if (district.getCells().isEmpty()) {
             return 0.0;
+        }
+        // Paper: αs = sum(aij for cells in s) / sum(aij for all cells)
+        // aij = street length per tile fetched from OSM.
+        // Falls back to uniform cell count if street data was unavailable.
+        if (totalStreetLength > 0) {
+            double districtStreetLength = district.getCells().stream()
+                    .mapToDouble(GridCell::getStreetLength).sum();
+            return districtStreetLength / totalStreetLength;
         }
         return (double) district.getCells().size() / totalCells;
     }
@@ -588,37 +631,7 @@ public class PdpAlgorithmService {
     }
 
     private boolean isPaperStyleConvex(List<GridCell> cells) {
-        if (cells == null || cells.isEmpty()) {
-            return false;
-        }
-        if (cells.size() <= 2) {
-            return true;
-        }
-
-        // Fast pre-filter
-        if (!isOrthogonallyConvex(cells)) {
-            return false;
-        }
-
-        for (int i = 0; i < cells.size(); i++) {
-            for (int j = i + 1; j < cells.size(); j++) {
-                GridCell a = cells.get(i);
-                GridCell b = cells.get(j);
-
-                int manhattanDistance = manhattan(a, b);
-                int shortestPathDistance = shortestPathWithinDistrict(cells, a, b);
-
-                if (shortestPathDistance == Integer.MAX_VALUE) {
-                    return false;
-                }
-
-                if (shortestPathDistance > manhattanDistance) {
-                    return false;
-                }
-            }
-        }
-
-        return true;
+        return isOrthogonallyConvex(cells);
     }
 
     private int shortestPathWithinDistrict(List<GridCell> cells, GridCell start, GridCell target) {

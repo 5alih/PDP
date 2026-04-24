@@ -2,13 +2,16 @@ package com.police.districting.util;
 
 import com.police.districting.model.CrimeRecord;
 import com.police.districting.model.GridCell;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Component
 public class DataPreprocessor {
 
@@ -45,11 +48,15 @@ public class DataPreprocessor {
     }
 
     public static List<GridCell> createGrid(List<CrimeRecord> crimes, int gridSize) {
+        return createGrid(crimes, gridSize, Collections.emptyMap());
+    }
+
+    public static List<GridCell> createGrid(List<CrimeRecord> crimes, int gridSize,
+                                             Map<String, Double> streetLengths) {
         GridBounds bounds = computeBounds(crimes, gridSize);
         double latStep = bounds.getLatBinSize();
         double lonStep = bounds.getLonBinSize();
 
-        // Count crimes per cell
         Map<String, Long> cellCounts = crimes.stream().collect(Collectors.groupingBy(
             crime -> {
                 int latBin = Math.min((int) ((crime.getLatitude() - bounds.minLat) / latStep), gridSize - 1);
@@ -59,7 +66,6 @@ public class DataPreprocessor {
             Collectors.counting()
         ));
 
-        // Max count for normalization
         long maxCount = cellCounts.values().stream().mapToLong(Long::longValue).max().orElse(1L);
 
         List<GridCell> cells = new ArrayList<>();
@@ -67,15 +73,17 @@ public class DataPreprocessor {
             for (int j = 0; j < gridSize; j++) {
                 String key = i + "," + j;
                 int count = cellCounts.getOrDefault(key, 0L).intValue();
-
-                // Paper-inspired risk proxy:
-                // normalize count to [0,1], then slightly emphasize hotspots
-                double normalized = maxCount == 0 ? 0.0 : (double) count / maxCount;
-                double riskScore = Math.pow(normalized, 1.5);
-
-                cells.add(new GridCell(i, j, count, riskScore));
+                double riskScore = maxCount == 0 ? 0.0 : (double) count / maxCount;
+                double streetLength = streetLengths.getOrDefault(key, 0.0);
+                cells.add(new GridCell(i, j, count, riskScore, streetLength));
             }
         }
+
+        long nonZeroCells = cells.stream().filter(c -> c.getCrimeCount() > 0).count();
+        long streetCells  = cells.stream().filter(c -> c.getStreetLength() > 0).count();
+        log.info("Grid {}x{}: {} cells, {} with crime, {} with street data (maxCrimeCount={})",
+                gridSize, gridSize, cells.size(), nonZeroCells, streetCells, maxCount);
+
         return cells;
     }
 }
