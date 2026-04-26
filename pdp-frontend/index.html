@@ -205,40 +205,63 @@
             map._districtLayer = group;
         }
 
-        async function fetchWithRetry(url, body, label, maxAttempts = 3) {
+        async function fetchWithRetry(url, body, label, metricsElementId, maxAttempts = 3) {
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                 const suffix = attempt > 1 ? ` (retry ${attempt}/${maxAttempts})` : '';
-                document.getElementById('metricsPdp').innerText = `Loading ${label}...${suffix}`;
+                document.getElementById(metricsElementId).innerText = `Loading ${label}...${suffix}`;
+
                 const resp = await fetch(url, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body)
                 });
+
                 if (!resp.ok) throw new Error(`${label} backend error`);
+
                 const data = await resp.json();
+
                 if (data.districts && data.districts.length > 0) return data;
-                if (attempt < maxAttempts)
+
+                if (attempt < maxAttempts) {
                     console.warn(`${label} returned empty result, retrying...`);
+                }
             }
+
             return null;
         }
 
         async function runAlgorithms() {
             const year = document.getElementById('year').value;
             const numDistricts = parseInt(document.getElementById('numDistricts').value);
-            const requestBody = { numDistricts, year, maxRecords: 20000 };
+            // const requestBody = { numDistricts, year, maxRecords: 20000 };
+            const requestBody = {
+                numDistricts,
+                year: parseInt(year),
+                maxRecords: 5000,
+                gridSize: 10,
+                lambda: 0.5,
+                timeLimitMillis: 10000
+            };
 
             document.getElementById('metricsPdp').innerText = 'Loading PDP...';
             document.getElementById('metricsSa').innerText = 'Waiting for PDP...';
 
             try {
                 const pdpData = await fetchWithRetry(
-                    'http://localhost:8088/api/pdp/solve', requestBody, 'PDP');
+                        'http://localhost:8088/api/pdp/solve',
+                        requestBody,
+                        'PDP',
+                        'metricsPdp'
+                    );
                 if (!pdpData) throw new Error('PDP returned no solution after 3 attempts');
 
                 document.getElementById('metricsSa').innerText = 'Loading SA...';
                 const saData = await fetchWithRetry(
-                    'http://localhost:8088/api/sa/solve', requestBody, 'SA');
+                    'http://localhost:8088/api/sa/solve',
+                    requestBody,
+                    'SA',
+                    'metricsSa'
+                );
 
                 const bounds = {
                     minLat: pdpData.minLat,
@@ -249,12 +272,18 @@
 
                 drawDistricts(mapPdp, pdpData.districts, bounds, pdpData.gridSize, pdpData.workloads);
                 document.getElementById('metricsPdp').innerHTML =
-                    `Objective: ${pdpData.objectiveValue.toFixed(6)} | Workloads: ${pdpData.workloads.map(w=>w.toFixed(3)).join(', ')}`;
+                    `Objective: ${pdpData.objectiveValue.toFixed(6)} |
+                    Runtime: ${(pdpData.runtimeMillis / 1000).toFixed(2)}s |
+                    Feasible: ${pdpData.feasible} |
+                    Workloads: ${pdpData.workloads.map(w=>w.toFixed(3)).join(', ')}`;
 
                 if (saData) {
                     drawDistricts(mapSa, saData.districts, bounds, saData.gridSize, saData.workloads);
                     document.getElementById('metricsSa').innerHTML =
-                        `Objective: ${saData.objectiveValue.toFixed(6)} | Workloads: ${saData.workloads.map(w=>w.toFixed(3)).join(', ')}`;
+                        `Objective: ${saData.objectiveValue.toFixed(6)} |
+                        Runtime: ${(saData.runtimeMillis / 1000).toFixed(2)}s |
+                        Feasible: ${saData.feasible} |
+                        Workloads: ${saData.workloads.map(w=>w.toFixed(3)).join(', ')}`;
                 } else {
                     document.getElementById('metricsSa').innerText = 'SA: no solution found after 3 attempts';
                 }
