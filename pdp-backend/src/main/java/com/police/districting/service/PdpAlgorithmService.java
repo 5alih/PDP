@@ -7,7 +7,6 @@ import org.springframework.stereotype.Service;
 
 import java.util.*;
 import java.util.stream.Collectors;
-import java.util.Comparator;
 
 @Slf4j
 @Service
@@ -35,20 +34,64 @@ public class PdpAlgorithmService {
     private final Random random = new Random();
 
     public void setLambda(double lambda) {
-    if (lambda < 0.0 || lambda > 1.0) {
-        throw new IllegalArgumentException("lambda must be between 0 and 1");
+        if (lambda < 0.0 || lambda > 1.0) {
+            throw new IllegalArgumentException("lambda must be between 0 and 1");
+        }
+        this.lambda = lambda;
     }
-    this.lambda = lambda;
+    public void initializeForEvaluation(List<GridCell> cells, int numDistricts) {
+        if (cells == null || cells.isEmpty()) {
+            throw new IllegalArgumentException("cells cannot be null or empty");
+        }
+
+        if (numDistricts <= 0) {
+            throw new IllegalArgumentException("numDistricts must be > 0");
+        }
+
+        this.currentNumDistricts = numDistricts;
+        initializeContext(cells);
     }
 
     public boolean isFeasible(List<District> districts, int expectedDistrictCount, int expectedCellCount) {
         return isFeasibleSolution(districts, expectedDistrictCount, expectedCellCount);
     }
 
+    public boolean isBasicFeasible(List<District> districts,
+                                int expectedDistrictCount,
+                                int expectedCellCount) {
+        if (districts == null || districts.size() != expectedDistrictCount) {
+            return false;
+        }
+
+        int totalAssigned = 0;
+        Set<String> seen = new HashSet<>();
+
+        for (District district : districts) {
+            if (district == null || district.getCells().isEmpty()) {
+                return false;
+            }
+
+            // SA için convexity zorunlu değil, ama connected olmak zorunda
+            if (!isConnected(district.getCells())) {
+                return false;
+            }
+
+            for (GridCell cell : district.getCells()) {
+                totalAssigned++;
+
+                if (!seen.add(cellKey(cell))) {
+                    return false; // duplicate cell
+                }
+            }
+        }
+
+        return totalAssigned == expectedCellCount;
+    }
+
     /**
      * Produces one feasible initial solution via a single greedy pass + local search.
-     * Intended for SA warm-start so SA can run independently of the full multi-start PDP.
-     * Returns an empty list if the greedy pass fails to assign all cells.
+     * Kept as a utility method for testing or optional warm-start experiments.
+     * The current SA implementation does not use this method.
      */
     public List<District> buildSinglePassInitialSolution(List<GridCell> cells, int numDistricts) {
         this.currentNumDistricts = numDistricts;
@@ -539,7 +582,7 @@ public class PdpAlgorithmService {
             }
         }
 
-        return maxDist / maxPossibleDistance;
+        return (double) maxDist / maxPossibleDistance;
     }
 
     private int computeSupportThreshold() {
